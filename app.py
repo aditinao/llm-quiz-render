@@ -2,16 +2,11 @@
 import os
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from redis import Redis
-from rq import Queue
+from tasks import process_quiz_job  # we call your solver directly
 
 QUIZ_SECRET = os.getenv("QUIZ_SECRET", "261")
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
-r = Redis.from_url(REDIS_URL)
-q = Queue("quiz-jobs", connection=r)
-
-app = FastAPI(title="LLM Analysis Quiz - Render-ready")
+app = FastAPI(title="LLM Analysis Quiz - HF Space")
 
 class Payload(BaseModel):
     email: str
@@ -20,7 +15,15 @@ class Payload(BaseModel):
 
 @app.post("/")
 async def receive(payload: Payload):
+    # 1) verify secret
     if payload.secret != QUIZ_SECRET:
         raise HTTPException(status_code=403, detail="Invalid secret")
-    job = q.enqueue("tasks.process_quiz_job", payload.email, payload.secret, payload.url, job_timeout=180)
-    return {"status": "accepted", "job_id": job.get_id()}
+
+    # 2) run the quiz solver (this will visit the URL, compute answer, submit it)
+    result = process_quiz_job(payload.email, payload.secret, payload.url)
+
+    # 3) return result (we already POST to the submit URL inside tasks.py)
+    return {
+        "status": "processed",
+        "result": result
+    }
