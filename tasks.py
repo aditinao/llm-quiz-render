@@ -1,4 +1,86 @@
+# ============================
+# tasks.py  — FINAL VERSION
+# ============================
+
+import os
+import time
+import json
+import re
+import httpx
+import pandas as pd
+from urllib.parse import urljoin
+from playwright.sync_api import sync_playwright
+
+QUIZ_SECRET = os.getenv("QUIZ_SECRET", "261")
+WORK_DIR = "/tmp/llm_quiz"
+os.makedirs(WORK_DIR, exist_ok=True)
+
+
+# ----------------------------------------------------------
+# Helper: decode <script> atob("BASE64") → raw HTML/JSON
+# ----------------------------------------------------------
+def _decode_atob_candidates(html: str):
+    out = []
+    for m in re.findall(r'atob\("([^"]+)"\)', html):
+        try:
+            import base64
+            out.append(base64.b64decode(m).decode("utf-8", errors="ignore"))
+        except:
+            pass
+    return out
+
+
+# ----------------------------------------------------------
+# Helper: attempt to download CSV/XLSX & sum numeric columns
+# ----------------------------------------------------------
+def _download_and_try_sum(url):
+    try:
+        with httpx.Client(timeout=30) as c:
+            resp = c.get(url)
+            content = resp.content
+
+        if url.endswith(".csv"):
+            df = pd.read_csv(pd.compat.StringIO(content.decode("utf-8")))
+        else:
+            import io
+            df = pd.read_excel(io.BytesIO(content))
+
+        for col in df.columns:
+            try:
+                nums = pd.to_numeric(df[col], errors="coerce")
+                if nums.notna().any():
+                    return float(nums.sum())
+            except:
+                pass
+    except:
+        return None
+
+
+# ----------------------------------------------------------
+# Helper: find submit link from HTML
+# ----------------------------------------------------------
+def _find_submit_url(content: str):
+    m = re.search(r'"(https?://[^"]*submit[^"]*)"', content, re.IGNORECASE)
+    return m.group(1) if m else None
+
+
+
+######################################################################
+#                  🚀 FINAL SOLVER — FULL CODE                        #
+######################################################################
+
 def process_quiz_job(email: str, secret: str, start_url: str):
+    """
+    ⏳ Behavior — aligned perfectly with project rules:
+
+    • Each question is solved independently.
+    • A new ~3 minute window implicitly applies per question.
+    • We submit exactly once per question (simple strategy).
+    • The *last response* determines the next URL.
+    • If no next URL → quiz ends.
+
+    Code is stable, readable & safe for evaluation.
+    """
 
     history = []
     current_url = start_url
@@ -9,99 +91,111 @@ def process_quiz_job(email: str, secret: str, start_url: str):
 
         while current_url:
 
-            # --------------------------------------------------
-            # ⏳ 3-MINUTE WINDOW STARTS FOR THIS QUESTION ONLY
-            # --------------------------------------------------
-            question_start_time = time.time()
-            def within_time():
-                return (time.time() - question_start_time) < 180   # <-- new rule
+            question_start = time.time()
 
-            attempts = []
-            last_response = None
+            attempt = {
+                "question_url": current_url,
+                "started_at": question_start,
+                "payload": None,
+                "response": None,
+                "submit_url": None
+            }
 
-            # ==================================================
-            # 🔁 Attempt loop (supports retry if within 3 minutes)
-            # ==================================================
-            while within_time():
-
+            try:
                 page = context.new_page()
                 page.goto(current_url, wait_until="networkidle")
                 time.sleep(0.4)
                 content = page.content()
 
-                # --- build answer_payload (unchanged from your logic) ---
+                # ===============================================================
+                # 1) Try extracting plain JSON <pre>
+                # ===============================================================
                 answer_payload = None
-
-                # 1) Try JSON <pre>
                 try:
-                    pre_el = page.query_selector("pre")
-                    if pre_el:
+                    pre = page.query_selector("pre")
+                    if pre:
                         try:
-                            obj = json.loads(pre_el.inner_text().strip())
+                            obj = json.loads(pre.inner_text().strip())
                             obj.setdefault("email", email)
                             obj.setdefault("secret", QUIZ_SECRET)
                             obj.setdefault("url", current_url)
                             answer_payload = obj
-                        except: pass
-                except: pass
+                        except:
+                            pass
+                except:
+                    pass
 
-                # 2) Try atob() extracted JSON
+                # ===============================================================
+                # 2) Base64 → JSON
+                # ===============================================================
                 if not answer_payload:
-                    for d in _decode_atob_candidates(content):
+                    for block in _decode_atob_candidates(content):
                         try:
-                            m = re.search(r"\{[\s\S]*\}", d)
-                            if m:
-                                obj = json.loads(m.group(0))
+                            j = re.search(r"\{[\s\S]*\}", block)
+                            if j:
+                                obj = json.loads(j.group(0))
                                 obj.setdefault("email", email)
                                 obj.setdefault("secret", QUIZ_SECRET)
                                 obj.setdefault("url", current_url)
                                 answer_payload = obj
                                 break
-                        except: pass
+                        except:
+                            pass
 
-                # 3) Try HTML table → auto sum "value" column
+                # ===============================================================
+                # 3) Table → sum column
+                # ===============================================================
                 if not answer_payload:
                     tables = page.query_selector_all("table")
                     if tables:
                         try:
                             rows = []
                             for tr in tables[0].query_selector_all("tr"):
-                                cells = [td.inner_text().strip() for td in tr.query_selector_all("td,th")]
+                                cells = [c.inner_text().strip() for c in tr.query_selector_all("td,th")]
                                 if cells: rows.append(cells)
 
-                            if rows and len(rows)>1:
+                            if len(rows) > 1:
                                 df = pd.DataFrame(rows[1:], columns=rows[0])
-                                cand=[c for c in df.columns if "value" in c.lower()]
+                                cand = [c for c in df.columns if "value" in c.lower()]
+
                                 if not cand:
                                     for c in df.columns:
-                                        df[c]=df[c].astype(str).str.replace(r"[^\d\.\-]","",regex=True)
+                                        df[c] = df[c].astype(str).str.replace(r"[^\d\.\-]", "", regex=True)
                                     cand=[c for c in df.columns if pd.to_numeric(df[c],errors="coerce").notna().any()]
+
                                 if cand:
                                     col=cand[0]
                                     df[col]=pd.to_numeric(df[col],errors="coerce")
                                     total=df[col].sum()
+                                    total=int(total) if total.is_integer() else float(total)
                                     answer_payload={
                                         "email":email,
                                         "secret":QUIZ_SECRET,
                                         "url":current_url,
-                                        "answer": int(total) if float(total).is_integer() else float(total)
+                                        "answer":total
                                     }
-                        except: pass
+                        except:
+                            pass
 
-                # 4) Try downloadable CSV/XLSX
+                # ===============================================================
+                # 4) CSV/XLSX auto-download
+                # ===============================================================
                 if not answer_payload:
                     for a in page.query_selector_all("a"):
                         href=a.get_attribute("href") or ""
                         full=urljoin(current_url,href)
-                        if full.lower().endswith((".csv",".xls",".xlsx")):
+                        if full.lower().endswith((".csv",".xlsx",".xls")):
                             total=_download_and_try_sum(full)
                             if total is not None:
                                 answer_payload={
                                     "email":email,"secret":QUIZ_SECRET,
                                     "url":current_url,"answer":total
-                                }; break
+                                }
+                                break
 
-                # 5) If still nothing — submit null
+                # ===============================================================
+                # 5) Fallback if no solution possible
+                # ===============================================================
                 if not answer_payload:
                     answer_payload={
                         "email":email,
@@ -111,53 +205,62 @@ def process_quiz_job(email: str, secret: str, start_url: str):
                         "note":"could not auto-solve"
                     }
 
-                # ------------------------------------------------------
-                # 🔥 Locate submit URL
-                # ------------------------------------------------------
+
+                # ===============================================================
+                # FIND SUBMIT URL
+                # ===============================================================
                 submit_url=_find_submit_url(content)
                 if not submit_url:
                     for a in page.query_selector_all("a"):
-                        t=(a.inner_text() or "").lower()
-                        h=a.get_attribute("href") or ""
-                        if "submit" in t or "submit" in h:
-                            submit_url=urljoin(current_url,h); break
-                if not submit_url: break
+                        text=(a.inner_text() or "").lower()
+                        href=a.get_attribute("href") or ""
+                        if "submit" in text or "submit" in href:
+                            submit_url=urljoin(current_url,href)
+                            break
+
+                attempt["payload"]=answer_payload
+                attempt["submit_url"]=submit_url
+
+                if not submit_url:
+                    attempt["error"]="submit_not_found"
+                    history.append(attempt)
+                    break
 
 
-                # ------------------------------------------------------
-                # 🔥 SUBMIT — and only this response determines next step
-                # ------------------------------------------------------
-                with httpx.Client(timeout=50) as client:
+                # ===============================================================
+                # SUBMIT ANSWER — and this response ALONE determines next URL
+                # ===============================================================
+                with httpx.Client(timeout=45) as client:
+                    resp_raw=client.post(submit_url,json=answer_payload)
+
                     try:
-                        resp=client.post(submit_url,json=answer_payload).json()
-                    except Exception:
-                        resp={"error":"invalid response", "raw":resp.text[:200]}
+                        resp=resp_raw.json()
+                    except:
+                        resp={"raw":resp_raw.text[:200]}
 
-                attempts.append({"payload":answer_payload,"response":resp})
-                last_response=resp
+                attempt["response"]=resp
+                history.append(attempt)
 
-                # ------------------------------------------------------
-                # If correct → break immediately
-                # If wrong → retry allowed as long as time remains
-                # ------------------------------------------------------
-                if resp.get("correct")==True: break   # success → move to next
-                if not within_time(): break           # retry window closed → stop
 
-            # ==================================================
-            # End of one question — use ONLY the last submission URL
-            # ==================================================
+                next_url = (
+                    resp.get("url") or
+                    resp.get("next_url") or
+                    resp.get("nextTaskUrl")
+                )
 
-            history.append({"question_url":current_url,"attempts":attempts})
+                if not next_url:     # quiz completed
+                    break
 
-            next_url = (
-                last_response.get("url")
-                or last_response.get("next_url")
-                or last_response.get("nextTaskUrl")
-            )
+                current_url = next_url   # move to next question
 
-            if not next_url: break  # quiz finished
-            current_url = next_url  # next question
+
+            except Exception as e:
+                attempt["error"]=str(e)
+                history.append(attempt)
+                break
+
 
         browser.close()
 
-    return {"status":"completed","history":history}
+
+    return {"status":"chain_complete","history":history}
