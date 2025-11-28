@@ -1,8 +1,10 @@
-# app.py
 import os
+import traceback
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from tasks import process_quiz_job  # we call your solver directly
+from starlette.concurrency import run_in_threadpool  # 👈 REQUIRED FIX
+from tasks import process_quiz_job
 
 QUIZ_SECRET = os.getenv("QUIZ_SECRET", "261")
 
@@ -15,15 +17,29 @@ class Payload(BaseModel):
 
 @app.post("/")
 async def receive(payload: Payload):
-    # 1) verify secret
+    # Validate secret
     if payload.secret != QUIZ_SECRET:
         raise HTTPException(status_code=403, detail="Invalid secret")
 
-    # 2) run the quiz solver (this will visit the URL, compute answer, submit it)
-    result = process_quiz_job(payload.email, payload.secret, payload.url)
+    try:
+        # 🟢 Run quiz logic in background thread so Playwright doesn’t crash
+        result = await run_in_threadpool(
+            process_quiz_job,
+            payload.email,
+            payload.secret,
+            payload.url
+        )
+        return {"status": "processed", "result": result}
 
-    # 3) return result (we already POST to the submit URL inside tasks.py)
-    return {
-        "status": "processed",
-        "result": result
-    }
+    except Exception as e:
+        tb = traceback.format_exc()
+        # Instead of 500, return traceback to debug inside /docs
+        return JSONResponse(
+            status_code=200,
+            content={
+                "status": "solver_error",
+                "error": str(e),
+                "traceback": tb
+            }
+        )
+
