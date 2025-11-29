@@ -1,4 +1,4 @@
-# tasks.py — final with retry logic
+# tasks.py — final with retry logic (FIXED email/secret overwrite)
 
 import os
 import time
@@ -118,7 +118,7 @@ def process_quiz_job(email: str, secret: str, start_url: str):
                     content = page.content()
 
                     # ======================================================
-                    # Build answer_payload (same logic as before)
+                    # Build answer_payload
                     # ======================================================
                     answer_payload = None
 
@@ -129,9 +129,10 @@ def process_quiz_job(email: str, secret: str, start_url: str):
                             txt = pre_el.inner_text().strip()
                             try:
                                 obj = json.loads(txt)
-                                obj.setdefault("email", email)
-                                obj.setdefault("secret", QUIZ_SECRET)
-                                obj.setdefault("url", current_url)
+                                # ⬇️ Force overwrite placeholders
+                                obj["email"] = email
+                                obj["secret"] = QUIZ_SECRET
+                                obj["url"] = current_url
                                 answer_payload = obj
                             except Exception:
                                 pass
@@ -147,9 +148,9 @@ def process_quiz_job(email: str, secret: str, start_url: str):
                                 if m:
                                     candidate = m.group(0)
                                     obj = json.loads(candidate)
-                                    obj.setdefault("email", email)
-                                    obj.setdefault("secret", QUIZ_SECRET)
-                                    obj.setdefault("url", current_url)
+                                    obj["email"] = email
+                                    obj["secret"] = QUIZ_SECRET
+                                    obj["url"] = current_url
                                     answer_payload = obj
                                     break
                             except Exception:
@@ -301,10 +302,6 @@ def process_quiz_job(email: str, secret: str, start_url: str):
                     # If last attempt or low time left → stop retrying
                     if attempt_index >= MAX_ATTEMPTS or time_left() < 20:
                         break
-
-                    # Otherwise: we *could* try again (e.g., with better heuristics),
-                    # but in this simple version we'll recompute the same way
-                    # on the next loop iteration.
 
                 except Exception as e:
                     attempt_record["error"] = str(e)
