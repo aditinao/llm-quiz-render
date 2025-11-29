@@ -349,7 +349,7 @@ def process_quiz_job(email: str, secret: str, start_url: str):
             page = ctx.new_page()
             page.goto(current, wait_until="networkidle")
             content = page.content()
-            # FIXED: need a selector, so use body
+            # use body text as question context
             question_text = page.inner_text("body")
 
             payload = None
@@ -468,11 +468,31 @@ def process_quiz_job(email: str, secret: str, start_url: str):
 
             # --- FIND SUBMIT URL ---
             submit = None
+
+            # 1) Look for clickable links with 'submit'
             for a in page.query_selector_all("a"):
                 label = (a.inner_text() or "") + " " + (a.get_attribute("href") or "")
                 if "submit" in label.lower():
                     submit = urljoin(current, a.get_attribute("href"))
                     break
+
+            # 2) If not found, parse from text like:
+            #    "POST this JSON to https://.../submit" or "POST this JSON to /submit"
+            if not submit:
+                m = re.search(
+                    r"POST this JSON to\s+([^\s\"'>]+)",
+                    question_text,
+                    flags=re.I,
+                )
+                if not m:
+                    m = re.search(
+                        r"POST this JSON to\s+([^\s\"'>]+)",
+                        content,
+                        flags=re.I,
+                    )
+                if m:
+                    candidate = m.group(1)
+                    submit = urljoin(current, candidate)
 
             if not submit:
                 # No submit link: stop the quiz chain
