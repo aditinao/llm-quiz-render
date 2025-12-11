@@ -1,57 +1,44 @@
-import os
-import traceback
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
-from fastapi.exceptions import RequestValidationError
-from pydantic import BaseModel
-from starlette.concurrency import run_in_threadpool
+import json
+from fastapi import FastAPI, Request
+import uvicorn
+from solver.fetcher import fetch_quiz
+from solver.solve import solve_question
+from solver.submit import submit_answer
 
-from tasks import process_quiz_job
-
-QUIZ_SECRET = os.getenv("QUIZ_SECRET", "261")
-
-app = FastAPI(title="LLM Analysis Quiz - HF Space")
-
-
-class Payload(BaseModel):
-    email: str
-    secret: str
-    url: str
-
-
-@app.exception_handler(RequestValidationError)
-async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    # Spec: invalid JSON / payload -> 400
-    return JSONResponse(
-        status_code=400,
-        content={"detail": "Invalid JSON or payload", "errors": exc.errors()},
-    )
-
+app = FastAPI()
 
 @app.post("/")
-async def receive(payload: Payload):
-    # Validate secret
-    if payload.secret != QUIZ_SECRET:
-        raise HTTPException(status_code=403, detail="Invalid secret")
+async def start_eval(request: Request):
+    """
+    This endpoint is what you ping using:
 
-    try:
-        # Run quiz logic in a background thread so Playwright doesn't block event loop
-        result = await run_in_threadpool(
-            process_quiz_job,
-            payload.email,
-            payload.secret,
-            payload.url,
-        )
-        return {"status": "processed", "result": result}
+    curl -X POST YOUR_HF_URL \
+        -H "Content-Type: application/json" \
+        -d '{"email": "...", "secret": "...", "url": "QUIZ_URL"}'
+    """
 
-    except Exception as e:
-        tb = traceback.format_exc()
-        # Return a 200 with error info so you can see it in /docs / HF logs
-        return JSONResponse(
-            status_code=200,
-            content={
-                "status": "solver_error",
-                "error": str(e),
-                "traceback": tb,
-            },
-        )
+    data = await request.json()
+    quiz_url = data["url"]
+
+    while quiz_url:
+        print(f"\n🔵 Fetching quiz: {quiz_url}")
+        question, submit_url = fetch_quiz(quiz_url)
+
+        print(f"Question extracted: {question}")
+        answer = solve_question(question)
+
+        print(f"Submitting answer to {submit_url}")
+        resp = submit_answer(submit_url, answer)
+
+        print("Response:", resp)
+
+        if resp.get("url"):
+            quiz_url = resp["url"]
+        else:
+            print("🎉 Quiz completed")
+            break
+
+    return {"status": "completed"}
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=7860)
