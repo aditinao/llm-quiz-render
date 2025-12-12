@@ -218,7 +218,8 @@ def run_quiz_flow(start_url, email, secret, logger=None, overall_timeout=180):
             if logger:
                 logger.warning("All LLM attempts failed. Using final simple heuristic.")
 
-        payload = {"email": email, "secret": secret, "answer": answer}
+        payload = {"email": email, "secret": secret, "url": current_url, "answer": answer}
+
         
         # find submit URL
         submit_url = extract_submit_url_from_html(html, base_url=current_url)
