@@ -34,14 +34,22 @@ def fetch_url_text(url, timeout=20):
     r.raise_for_status()
     return r.text, r.headers
 
-def post_json(url, payload, timeout=20):
-    r = requests.post(url, json=payload, timeout=timeout)
-    r.raise_for_status()
-    # return parsed json if any, else raw text
+def post_json(url, payload, timeout=20, logger=None):
+    headers = {"Content-Type": "application/json"}
+    r = requests.post(url, json=payload, headers=headers, timeout=timeout)
+    # If status is not 2xx, include the body in the exception for debugging
+    if not r.ok:
+        body = r.text
+        msg = f"POST {url} returned {r.status_code}. Body: {body}"
+        if logger:
+            logger.error(msg)
+        # raise requests.HTTPError with body included
+        r.raise_for_status()
     try:
         return r.json()
     except Exception:
         return r.text
+
 
 def extract_submit_url_from_html(html, base_url=None):
     soup = BeautifulSoup(html, "html.parser")
